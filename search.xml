@@ -5,8 +5,8 @@
     
     <entry>
       <title>Hello World</title>
-      <link href="/chenxiao.github.io/2026/06/04/hello-world/"/>
-      <url>/chenxiao.github.io/2026/06/04/hello-world/</url>
+      <link href="/2026/06/04/hello-world/"/>
+      <url>/2026/06/04/hello-world/</url>
       
         <content type="html"><![CDATA[<p>欢迎来到 chenxiao 的博客 🎉</p><p>这是我的第一篇博客文章。这个博客使用 <a href="https://hexo.io/">Hexo</a> 和 <a href="https://butterfly.js.org/">Butterfly</a> 主题搭建，部署在 GitHub Pages 上。</p><h2 id="关于我"><a href="#关于我" class="headerlink" title="关于我"></a>关于我</h2><p>一个热爱编程和技术探索的开发者，关注 CUDA 编程、深度学习推理优化和系统设计。</p><h2 id="博客计划"><a href="#博客计划" class="headerlink" title="博客计划"></a>博客计划</h2><p>后续会陆续更新以下内容：</p><ul><li>CUDA 编程学习笔记</li><li>深度学习推理优化实践</li><li>系统设计相关文章</li><li>技术杂谈</li></ul><p>敬请期待！</p><figure class="highlight python"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line"><span class="built_in">print</span>(<span class="string">&quot;Hello, chenxiao&#x27;s blog!&quot;</span>)</span><br></pre></td></tr></table></figure>]]></content>
       
