@@ -1,38 +1,32 @@
 ---
 title: Hello World
+date: 2026-06-04 21:40:00
+updated: 2026-06-04 21:40:00
+tags:
+  - 博客
+categories:
+  - 技术随笔
 ---
-Welcome to [Hexo](https://hexo.io/)! This is your very first post. Check [documentation](https://hexo.io/docs/) for more info. If you get any problems when using Hexo, you can find the answer in [troubleshooting](https://hexo.io/docs/troubleshooting.html) or you can ask me on [GitHub](https://github.com/hexojs/hexo/issues).
 
-## Quick Start
+欢迎来到 chenxiao 的博客 🎉
 
-### Create a new post
+这是我的第一篇博客文章。这个博客使用 [Hexo](https://hexo.io/) 和 [Butterfly](https://butterfly.js.org/) 主题搭建，部署在 GitHub Pages 上。
 
-``` bash
-$ hexo new "My New Post"
+## 关于我
+
+一个热爱编程和技术探索的开发者，关注 CUDA 编程、深度学习推理优化和系统设计。
+
+## 博客计划
+
+后续会陆续更新以下内容：
+
+- CUDA 编程学习笔记
+- 深度学习推理优化实践
+- 系统设计相关文章
+- 技术杂谈
+
+敬请期待！
+
+```python
+print("Hello, chenxiao's blog!")
 ```
-
-More info: [Writing](https://hexo.io/docs/writing.html)
-
-### Run server
-
-``` bash
-$ hexo server
-```
-
-More info: [Server](https://hexo.io/docs/server.html)
-
-### Generate static files
-
-``` bash
-$ hexo generate
-```
-
-More info: [Generating](https://hexo.io/docs/generating.html)
-
-### Deploy to remote sites
-
-``` bash
-$ hexo deploy
-```
-
-More info: [Deployment](https://hexo.io/docs/one-command-deployment.html)
