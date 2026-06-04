@@ -13,7 +13,8 @@ timezone: 'Asia/Shanghai'
 
 # URL
 ## Set your site url here. For example, if you use GitHub Page, set url as 'https://username.github.io/project'
-url: https://chenxiao.github.io
+url: https://kurumi5210.github.io/chenxiao.github.io
+root: /chenxiao.github.io/
 permalink: :year/:month/:day/:title/
 permalink_defaults:
 pretty_urls:
@@ -93,4 +94,4 @@ theme: butterfly
 deploy:
   type: git
   repo: git@github.com:Kurumi5210/chenxiao.github.io.git
-  branch: main
+  branch: gh-pages
