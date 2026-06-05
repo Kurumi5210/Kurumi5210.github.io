@@ -349,6 +349,7 @@
 <td>+11.229%</td>
 </tr>
 </tbody></table>
+<p>此外，在测试过程中通过 profiling 发现了一个值得关注的性能细节：GQA KV Cache 在 prefix 命中场景下，调用的算子性能较差，部分算子的执行时间明显长于预期。这提示在 GQA 模型上开启 Prefix Cache 时，除了缓存命中率本身，底层算子的实现效率也是影响端到端收益的关键因素，后续可以针对命中路径的算子做定向优化。</p>
 <p>纯 GPU 命中场景下有一点点负收益（异步写入的开销），所以在 prefix 命中率不高的场景下不建议开启。但在输入存在大量语义重复的真实场景——Agent 对话、代码库分析、智能客服、文档批量处理——命中率通常很高，收益非常明显。</p>
 <h2 id="交互流程"><a href="#交互流程" class="headerlink" title="交互流程"></a>交互流程</h2><p><img src="/images/CPUoffloading/%E4%BA%A4%E4%BA%92.png" alt="交互流程图"></p>
 <h2 id="小结"><a href="#小结" class="headerlink" title="小结"></a>小结</h2><p>这个项目本质上做了一件事：把 CPU DRAM 当成 HBM 的二级缓存，在 vLLM V1 的 KVConnector 扩展点上实现了节点级的 Prefix Cache 共享。</p>
@@ -362,7 +363,7 @@
 <p>当然，如果 prefix 命中率本身很低，CPU Offloading 的异步写入开销就是纯负收益，不建议无脑开启。它最适合的场景是输入中有大量稳定、可复用的语义前缀——而这恰好是 Agent 和 RAG 时代越来越普遍的负载特征。</p>
 <h2 id="笔者贡献"><a href="#笔者贡献" class="headerlink" title="笔者贡献"></a>笔者贡献</h2><p>我有幸深度参与了 vLLM-Ascend CPU Offloading 特性的完整研发周期，主要贡献如下：</p>
 <p><strong>方案设计与讨论</strong>：参与了 CPU Offloading 整体方案的技术讨论和评审，包括节点级 Prefix Cache 的共享边界设计、CPU&#x2F;NPU 数据通路的异步流水线方案、命中增益阈值的策略建模，以及与 MetadataServer 的接口协议定义。在方案迭代过程中推动了两阶段缓存提交机制和逐层 swap-in 流水线的落地，前者从设计上杜绝了”命中脏数据”的一致性问题，后者有效控制了 swap-in 对 TTFT 的延迟冲击。</p>
-<p><strong>收益测试与性能分析</strong>：独立设计并实现了三段式数据集构造方法和 benchmark 重复发送策略（sequential &#x2F; stack &#x2F; reverse），能够灵活构造 0% 到 100% 之间多种 GPU&#x2F;CPU 命中率组合，填补了 vLLM 原生 benchmark 在复杂命中场景下的测试空白。基于该工具完成了全场景性能收益测试，在 DeepSeek 模型上系统性验证了 CPU Offloading 的有效性边界，为方案的合并决策和适用场景推荐提供了数据支撑。</p>
+<p><strong>收益测试与性能分析</strong>：独立设计并实现了三段式数据集构造方法和 benchmark 重复发送策略（sequential &#x2F; stack &#x2F; reverse），能够灵活构造 0% 到 100% 之间多种 GPU&#x2F;CPU 命中率组合，填补了 vLLM 原生 benchmark 在复杂命中场景下的测试空白。基于该工具完成了全场景性能收益测试，在 DeepSeek 模型上系统性验证了 CPU Offloading 的有效性边界。此外，通过 profiling 深入分析发现 GQA KV Cache 在 prefix 命中场景下存在算子性能瓶颈，为后续性能优化指明了方向。以上工作为方案的合并决策和适用场景推荐提供了关键数据支撑。</p>
 <p><strong>稳定性修复</strong>：排查并修复了 <code>profile_run()</code> 显存估算偏差的隐蔽 bug——该问题在特定大并发场景下导致显存超分、进程卡死，定位难度较大。根因是 <code>is_kv_consumer</code> 判断逻辑导致 KVConnector 场景下的剩余显存估算偏高，修复为 <code>not is_kv_producer</code> 后显存估算与实际的 KV Cache 分配行为对齐，消除了此场景下的稳定性隐患。</p>
 <blockquote>
 <p>注：随着 vLLM 主仓在后续版本中原生支持了 CPU Offloading，vLLM-Ascend 中的 CPU Offloading 插件已从代码库中移除，相关能力由主仓统一提供。本文记录的方案设计、工程踩坑和性能分析经验，对理解 vLLM KVConnector 扩展机制和异构缓存系统设计仍有一定参考价值。</p>
