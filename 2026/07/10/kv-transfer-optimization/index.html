@@ -1,0 +1,305 @@
+<!DOCTYPE html><html lang="zh-CN" data-theme="light"><head><meta charset="UTF-8"><meta http-equiv="X-UA-Compatible" content="IE=edge"><meta name="viewport" content="width=device-width, initial-scale=1.0,viewport-fit=cover"><title>PD 分离场景下的 KV Cache 传输优化 | chenxiao's blog</title><meta name="author" content="chenxiao"><meta name="copyright" content="chenxiao"><meta name="format-detection" content="telephone=no"><meta name="theme-color" content="#ffffff"><meta name="description" content="本文记录一次 PD 分离场景下 Mooncake Connector 的 KV Cache 传输优化，重点是 Qwen3 等 GQA&#x2F;MHA&#x2F;MQA 模型下的 TP 异构、PP 适配、ACL Graph 稳定性问题，以及后续融合 transpose 算子的设计。  背景：从 MLA 到 GQA在 6 月 30 日，我们完成了 PD 分离场景下的 Mooncake Connec">
+<meta property="og:type" content="article">
+<meta property="og:title" content="PD 分离场景下的 KV Cache 传输优化">
+<meta property="og:url" content="https://kurumi5210.github.io/2026/07/10/kv-transfer-optimization/index.html">
+<meta property="og:site_name" content="chenxiao&#39;s blog">
+<meta property="og:description" content="本文记录一次 PD 分离场景下 Mooncake Connector 的 KV Cache 传输优化，重点是 Qwen3 等 GQA&#x2F;MHA&#x2F;MQA 模型下的 TP 异构、PP 适配、ACL Graph 稳定性问题，以及后续融合 transpose 算子的设计。  背景：从 MLA 到 GQA在 6 月 30 日，我们完成了 PD 分离场景下的 Mooncake Connec">
+<meta property="og:locale" content="zh_CN">
+<meta property="og:image" content="https://kurumi5210.github.io/img/avatar.png">
+<meta property="article:published_time" content="2026-07-10T09:19:56.000Z">
+<meta property="article:modified_time" content="2026-07-10T09:19:56.000Z">
+<meta property="article:author" content="chenxiao">
+<meta property="article:tag" content="Ascend">
+<meta property="article:tag" content="GQA">
+<meta property="article:tag" content="KV Cache">
+<meta property="article:tag" content="Mooncake">
+<meta property="article:tag" content="PD 分离">
+<meta property="article:tag" content="Pipeline Parallel">
+<meta property="article:tag" content="vLLM">
+<meta property="article:tag" content="推理优化">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:image" content="https://kurumi5210.github.io/img/avatar.png"><script type="application/ld+json">{
+  "@context": "https://schema.org",
+  "@type": "BlogPosting",
+  "headline": "PD 分离场景下的 KV Cache 传输优化",
+  "url": "https://kurumi5210.github.io/2026/07/10/kv-transfer-optimization/",
+  "image": "https://kurumi5210.github.io/img/avatar.png",
+  "datePublished": "2026-07-10T09:19:56.000Z",
+  "dateModified": "2026-07-10T09:19:56.000Z",
+  "author": [
+    {
+      "@type": "Person",
+      "name": "chenxiao",
+      "url": "https://kurumi5210.github.io"
+    }
+  ]
+}</script><link rel="shortcut icon" href="/img/favicon.png"><link rel="canonical" href="https://kurumi5210.github.io/2026/07/10/kv-transfer-optimization/index.html"><link rel="preconnect" href="//cdn.jsdelivr.net"/><link rel="preconnect" href="//busuanzi.ibruce.info"/><link rel="stylesheet" href="/css/index.css?v=5.5.4"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@7.1.0/css/all.min.css"><script>
+    (() => {
+      
+    const saveToLocal = {
+      set: (key, value, ttl) => {
+        if (!ttl) return
+        const expiry = Date.now() + ttl * 86400000
+        localStorage.setItem(key, JSON.stringify({ value, expiry }))
+      },
+      get: key => {
+        const itemStr = localStorage.getItem(key)
+        if (!itemStr) return undefined
+        const { value, expiry } = JSON.parse(itemStr)
+        if (Date.now() > expiry) {
+          localStorage.removeItem(key)
+          return undefined
+        }
+        return value
+      }
+    }
+
+    window.btf = {
+      saveToLocal,
+      getScript: (url, attr = {}) => new Promise((resolve, reject) => {
+        const script = document.createElement('script')
+        script.src = url
+        script.async = true
+        Object.entries(attr).forEach(([key, val]) => script.setAttribute(key, val))
+        script.onload = script.onreadystatechange = () => {
+          if (!script.readyState || /loaded|complete/.test(script.readyState)) resolve()
+        }
+        script.onerror = reject
+        document.head.appendChild(script)
+      }),
+      getCSS: (url, id) => new Promise((resolve, reject) => {
+        const link = document.createElement('link')
+        link.rel = 'stylesheet'
+        link.href = url
+        if (id) link.id = id
+        link.onload = link.onreadystatechange = () => {
+          if (!link.readyState || /loaded|complete/.test(link.readyState)) resolve()
+        }
+        link.onerror = reject
+        document.head.appendChild(link)
+      }),
+      addGlobalFn: (key, fn, name = false, parent = window) => {
+        if (!false && key.startsWith('pjax')) return
+        const globalFn = parent.globalFn || {}
+        globalFn[key] = globalFn[key] || {}
+        globalFn[key][name || Object.keys(globalFn[key]).length] = fn
+        parent.globalFn = globalFn
+      }
+    }
+  
+      
+      const activateDarkMode = () => {
+        document.documentElement.setAttribute('data-theme', 'dark')
+        if (document.querySelector('meta[name="theme-color"]') !== null) {
+          document.querySelector('meta[name="theme-color"]').setAttribute('content', 'undefined')
+        }
+      }
+      const activateLightMode = () => {
+        document.documentElement.setAttribute('data-theme', 'light')
+        if (document.querySelector('meta[name="theme-color"]') !== null) {
+          document.querySelector('meta[name="theme-color"]').setAttribute('content', 'undefined')
+        }
+      }
+
+      btf.activateDarkMode = activateDarkMode
+      btf.activateLightMode = activateLightMode
+
+      const theme = saveToLocal.get('theme')
+    
+          theme === 'dark' ? activateDarkMode() : theme === 'light' ? activateLightMode() : null
+        
+      
+      const asideStatus = saveToLocal.get('aside-status')
+      if (asideStatus !== undefined) {
+        document.documentElement.classList.toggle('hide-aside', asideStatus === 'hide')
+      }
+    
+      
+    const detectApple = () => {
+      if (/iPad|iPhone|iPod|Macintosh/.test(navigator.userAgent)) {
+        document.documentElement.classList.add('apple')
+      }
+    }
+    detectApple()
+  
+    })()
+  </script><script>const GLOBAL_CONFIG = {
+  root: '/',
+  algolia: undefined,
+  localSearch: {"path":"/search.xml","preload":false,"top_n_per_article":1,"unescape":false,"pagination":{"enable":false,"hitsPerPage":8},"languages":{"hits_empty":"未找到符合您查询的内容：${query}","hits_stats":"共找到 ${hits} 篇文章"}},
+  translate: undefined,
+  highlight: {"plugin":"highlight.js","highlightCopy":true,"highlightLang":true,"highlightHeightLimit":false,"highlightFullpage":false,"highlightMacStyle":false},
+  copy: {
+    success: '复制成功',
+    error: '复制失败',
+    noSupport: '浏览器不支持'
+  },
+  relativeDate: {
+    homepage: false,
+    post: false
+  },
+  runtime: '',
+  dateSuffix: {
+    just: '刚刚',
+    min: '分钟前',
+    hour: '小时前',
+    day: '天前',
+    month: '个月前'
+  },
+  copyright: undefined,
+  lightbox: 'null',
+  Snackbar: undefined,
+  infinitegrid: {
+    js: 'https://cdn.jsdelivr.net/npm/@egjs/infinitegrid@4.13.0/dist/infinitegrid.min.js',
+    buttonText: '加载更多'
+  },
+  isPhotoFigcaption: false,
+  islazyloadPlugin: false,
+  isAnchor: false,
+  percent: {
+    toc: true,
+    rightside: false,
+  },
+  autoDarkmode: false
+}</script><script id="config-diff">var GLOBAL_CONFIG_SITE = {
+  title: 'PD 分离场景下的 KV Cache 传输优化',
+  isHighlightShrink: false,
+  isToc: true,
+  pageType: 'post'
+}</script><meta name="generator" content="Hexo 8.1.2"></head><body><div id="sidebar"><div id="menu-mask"></div><div id="sidebar-menus"><div class="avatar-img text-center"><img src="/img/avatar.png" onerror="this.onerror=null;this.src='/img/friend_404.gif'" alt="avatar"/></div><div class="site-data text-center"><a href="/archives/"><div class="headline">文章</div><div class="length-num">3</div></a><a href="/tags/"><div class="headline">标签</div><div class="length-num">11</div></a><a href="/categories/"><div class="headline">分类</div><div class="length-num">2</div></a></div><div class="menus_items"><div class="menus_item"><a class="site-page" href="/"><i class="fa-fw fas fa-home"></i><span> 首页</span></a></div><div class="menus_item"><a class="site-page" href="/tags/"><i class="fa-fw fas fa-tags"></i><span> 标签</span></a></div><div class="menus_item"><a class="site-page" href="/categories/"><i class="fa-fw fas fa-folder-open"></i><span> 分类</span></a></div><div class="menus_item"><a class="site-page" href="/archives/"><i class="fa-fw fas fa-archive"></i><span> 归档</span></a></div><div class="menus_item"><a class="site-page" href="/about/"><i class="fa-fw fas fa-heart"></i><span> 关于</span></a></div></div></div></div><div class="post" id="body-wrap"><header class="post-bg" id="page-header"><nav id="nav"><span id="blog-info"><a class="nav-site-title" href="/"><span class="site-name">chenxiao's blog</span></a><a class="nav-page-title" href="/"><span class="site-name">PD 分离场景下的 KV Cache 传输优化</span><span class="site-name"><i class="fa-solid fa-circle-arrow-left"></i><span>  返回首页</span></span></a></span><div id="menus"><div id="search-button"><span class="site-page social-icon search"><i class="fas fa-search fa-fw"></i><span> 搜索</span></span></div><div class="menus_items"><div class="menus_item"><a class="site-page" href="/"><i class="fa-fw fas fa-home"></i><span> 首页</span></a></div><div class="menus_item"><a class="site-page" href="/tags/"><i class="fa-fw fas fa-tags"></i><span> 标签</span></a></div><div class="menus_item"><a class="site-page" href="/categories/"><i class="fa-fw fas fa-folder-open"></i><span> 分类</span></a></div><div class="menus_item"><a class="site-page" href="/archives/"><i class="fa-fw fas fa-archive"></i><span> 归档</span></a></div><div class="menus_item"><a class="site-page" href="/about/"><i class="fa-fw fas fa-heart"></i><span> 关于</span></a></div></div><div id="toggle-menu"><span class="site-page"><i class="fas fa-bars fa-fw"></i></span></div></div></nav><div id="post-info"><h1 class="post-title">PD 分离场景下的 KV Cache 传输优化</h1><div id="post-meta"><div class="meta-firstline"><span class="post-meta-date"><i class="far fa-calendar-alt fa-fw post-meta-icon"></i><span class="post-meta-label">发表于</span><time class="post-meta-date-created" datetime="2026-07-10T09:19:56.000Z" title="发表于 2026-07-10 17:19:56">2026-07-10</time><span class="post-meta-separator">|</span><i class="fas fa-history fa-fw post-meta-icon"></i><span class="post-meta-label">更新于</span><time class="post-meta-date-updated" datetime="2026-07-10T09:19:56.000Z" title="更新于 2026-07-10 17:19:56">2026-07-10</time></span><span class="post-meta-categories"><span class="post-meta-separator">|</span><i class="fas fa-inbox fa-fw post-meta-icon"></i><a class="post-meta-categories" href="/categories/%E6%8E%A8%E7%90%86%E4%BC%98%E5%8C%96/">推理优化</a></span></div><div class="meta-secondline"><span class="post-meta-separator">|</span><span class="post-meta-pv-cv" id="" data-flag-title=""><i class="far fa-eye fa-fw post-meta-icon"></i><span class="post-meta-label">浏览量:</span><span id="busuanzi_value_page_pv"><i class="fa-solid fa-spinner fa-spin"></i></span></span></div></div></div></header><main class="layout" id="content-inner"><div id="post"><article class="container post-content" id="article-container"><blockquote>
+<p>本文记录一次 PD 分离场景下 Mooncake Connector 的 KV Cache 传输优化，重点是 Qwen3 等 GQA&#x2F;MHA&#x2F;MQA 模型下的 TP 异构、PP 适配、ACL Graph 稳定性问题，以及后续融合 transpose 算子的设计。</p>
+</blockquote>
+<h2 id="背景：从-MLA-到-GQA"><a href="#背景：从-MLA-到-GQA" class="headerlink" title="背景：从 MLA 到 GQA"></a>背景：从 MLA 到 GQA</h2><p>在 6 月 30 日，我们完成了 PD 分离场景下的 Mooncake Connector，主要用于 Prefill 节点到 Decode 节点之间的 KV Cache 传输。初版主要面向 DeepSeek 模型开发，它的 attention 使用 MLA（Multi-Head Linear Attention），KV Cache 的组织方式有两个比较友好的特点：</p>
+<ol>
+<li>KV Cache 由 embedding 之后的 hidden states 经过下投影矩阵生成。</li>
+<li>在 TP（Tensor Parallel）域内，各个 TP rank 可以缓存全量 KV Cache。Decode 节点拉取 KV Cache 时，选择哪个 Prefill TP rank 都是可行的。</li>
+</ol>
+<p>随着 Qwen3 适配推进，GQA、MHA、MQA 场景把问题复杂化了。核心变化是：TP 域内的 KV Cache 不再统一。Decode 节点不能再随便挑一个 Prefill TP rank 拉数据，而是必须选择正确的 rank，并且在 Decode 节点的 local block 内完成重排序。</p>
+<p>这带来两个直接挑战：</p>
+<ul>
+<li><strong>TP 异构下的 KV Cache 不一致</strong>：Prefill 和 Decode 的 TP 配置不同，拉到 Decode 侧的数据排布不能直接用于 forward。</li>
+<li><strong>PP 场景下的层归属不同</strong>：拉取 KV Cache 时必须考虑 Prefill 节点的 PP stage，不同 stage 持有不同层的 KV Cache，即使 MLA 场景也不能忽略这一点。</li>
+</ul>
+<p>这次优化的目标很明确：</p>
+<ol>
+<li>在不明显影响性能的前提下，让 PD 分离支持 GQA TP 异构的 KV Cache 传输。</li>
+<li>支持 PP（Pipeline Parallel）场景下的 KV Cache 传输。</li>
+<li>支持开启 MTP（Multi-Token Prefill）后的 PP 流水线。</li>
+</ol>
+<h2 id="Decode-侧-KV-Cache-重排序"><a href="#Decode-侧-KV-Cache-重排序" class="headerlink" title="Decode 侧 KV Cache 重排序"></a>Decode 侧 KV Cache 重排序</h2><p>GQA 格式下，P 节点和 D 节点 TP 配置不同，P 节点生成的 KV Cache 与 D 节点期望的存储排布不一致。以 Qwen3 235B 为例，当 Prefill 侧 TP size 为 16、<code>num_heads = 4</code> 时，单个 TP rank 只能生成一部分 head 对应的 KV Cache。Decode 侧如果直接使用这些数据，forward 的 layout 就是错的。</p>
+<p>解决思路是把 layout 转换放到 Connector 层完成：</p>
+<ol>
+<li>以 block 为粒度对 KV Cache 做重排序，reshape 成符合 Decode 侧 TP size 的排布。</li>
+<li>vLLM Connector 感知 TP 配置，并完成 KV Cache 的 split 和 cat。</li>
+<li>底层 Mooncake TransferEngine 只负责数据传输，不感知 TP 配置。</li>
+<li>为避免额外申请大 buffer，引入逐 block 的 zero-copy 传输，并在传输完成后逐 block transpose，达到 cat 的效果。</li>
+</ol>
+<p><img src="/images/KVOptimization/gqa-tp-layout-reorder.png" alt="GQA TP 异构下的 KV Cache 重排序"></p>
+<p>重排序的执行流程如下：</p>
+<p><img src="/images/KVOptimization/cache-reorder-flow.png" alt="KV Cache 重排序流程"></p>
+<p>初版逐 block 重排序在 4K KV Cache 上约 120ms。由于每层 Decode 间需要频繁 launch kernel，在 4K x 1.5K benchmark 中，TPOT 增加了约 28ms。</p>
+<p>后续优化改成使用 <code>_npu_page_load</code> 读取 KV Cache，再用 <code>_npu_reshape_and_cache</code> 写回。这样每层只处理一次，只需要申请一层 KV Cache 大小的 buffer，大幅减少了 kernel launch 时间。</p>
+<h2 id="选择-Prefill-Rank"><a href="#选择-Prefill-Rank" class="headerlink" title="选择 Prefill Rank"></a>选择 Prefill Rank</h2><p>Decode 节点拉取 KV Cache 时，需要选择对应的 Prefill TP rank。这个选择逻辑在 MLA 和 GQA 场景下不一样：</p>
+<ul>
+<li>MLA 场景下，同一 TP 域内的 rank 可以缓存全量 KV Cache，因此可以随机选择 Prefill TP rank，用于动态负载均衡。</li>
+<li>GQA 场景下，TP rank 对应的数据分片不同，Decode 侧必须选择正确的 Prefill TP rank。</li>
+<li>PP 场景下，需要先按 PP stage 对 Prefill 节点分组，再在每个 PP stage 内选择 TP rank。</li>
+</ul>
+<p><img src="/images/KVOptimization/prefill-rank-selection.png" alt="Prefill TP Rank 选择逻辑"></p>
+<p>这部分改造的关键是让 Connector 同时感知 TP 和 PP 配置。TP 维度决定从哪个 rank 拉，PP 维度决定这个 rank 上有哪些 layer 需要拉。</p>
+<h2 id="KV-Cache-传输路径"><a href="#KV-Cache-传输路径" class="headerlink" title="KV Cache 传输路径"></a>KV Cache 传输路径</h2><p>真正的数据搬运仍然交给 Mooncake TransferEngine。Connector 负责根据源地址和目标地址列表构造传输任务，并把正确的地址偏移计算好。</p>
+<p>在 GQA TP 切分下，Decode 节点每层可能需要多次拉取 KV Cache。每次拉取的数据都要写入 Decode 侧 local block 的正确位置，因此必须引入地址 offset。</p>
+<p>PP 场景下，单个 Prefill rank 只持有一部分 layer 的 KV Cache。Connector 需要根据 PP stage 和 <code>get_pp_indices</code> 计算本次传输涉及的 layer，并将它们放到 Decode 节点对应地址。</p>
+<p><img src="/images/KVOptimization/kv-transfer-flow.png" alt="KV Cache 传输流程"></p>
+<p>这里的职责划分很重要：TransferEngine 只接受源地址和目标地址并完成传输，复杂的 TP&#x2F;PP layout 逻辑收敛在 Connector 内部。</p>
+<h2 id="手动划分-PP-Layer"><a href="#手动划分-PP-Layer" class="headerlink" title="手动划分 PP Layer"></a>手动划分 PP Layer</h2><p>开启 MTP 后，KV Cache 会多出 MTP 层，原有 <code>get_pp_indices</code> 无法感知这部分 layer，容易导致部分 KV Cache 未传输，或者 PP 层切分不均。</p>
+<p>为了解决这个问题，我们引入了手动 PP layer partition，通过 Connector 配置让 Mooncake Connector 感知层数切分。例如：</p>
+<figure class="highlight bash"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line"><span class="built_in">export</span> VLLM_PP_LAYER_PARTITION=33,28</span><br></pre></td></tr></table></figure>
+
+<figure class="highlight json"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br></pre></td><td class="code"><pre><span class="line"><span class="punctuation">&#123;</span></span><br><span class="line">  <span class="attr">&quot;kv_connector_extra_config&quot;</span><span class="punctuation">:</span> <span class="punctuation">&#123;</span></span><br><span class="line">    <span class="attr">&quot;use_ascend_direct&quot;</span><span class="punctuation">:</span> <span class="literal"><span class="keyword">true</span></span><span class="punctuation">,</span></span><br><span class="line">    <span class="attr">&quot;prefill&quot;</span><span class="punctuation">:</span> <span class="punctuation">&#123;</span></span><br><span class="line">      <span class="attr">&quot;dp_size&quot;</span><span class="punctuation">:</span> <span class="number">1</span><span class="punctuation">,</span></span><br><span class="line">      <span class="attr">&quot;tp_size&quot;</span><span class="punctuation">:</span> <span class="number">8</span><span class="punctuation">,</span></span><br><span class="line">      <span class="attr">&quot;pp_size&quot;</span><span class="punctuation">:</span> <span class="number">2</span><span class="punctuation">,</span></span><br><span class="line">      <span class="attr">&quot;pp_layer_partition&quot;</span><span class="punctuation">:</span> <span class="string">&quot;33,28&quot;</span></span><br><span class="line">    <span class="punctuation">&#125;</span><span class="punctuation">,</span></span><br><span class="line">    <span class="attr">&quot;decode&quot;</span><span class="punctuation">:</span> <span class="punctuation">&#123;</span></span><br><span class="line">      <span class="attr">&quot;dp_size&quot;</span><span class="punctuation">:</span> <span class="number">16</span><span class="punctuation">,</span></span><br><span class="line">      <span class="attr">&quot;tp_size&quot;</span><span class="punctuation">:</span> <span class="number">1</span><span class="punctuation">,</span></span><br><span class="line">      <span class="attr">&quot;pp_size&quot;</span><span class="punctuation">:</span> <span class="number">1</span></span><br><span class="line">    <span class="punctuation">&#125;</span></span><br><span class="line">  <span class="punctuation">&#125;</span></span><br><span class="line"><span class="punctuation">&#125;</span></span><br></pre></td></tr></table></figure>
+
+<p>这相当于把 PP layer 的切分结果显式交给 Connector，避免 Connector 只依赖默认 <code>get_pp_indices</code> 推断。</p>
+<h2 id="开发中遇到的几个问题"><a href="#开发中遇到的几个问题" class="headerlink" title="开发中遇到的几个问题"></a>开发中遇到的几个问题</h2><h3 id="Decode-重排序精度问题"><a href="#Decode-重排序精度问题" class="headerlink" title="Decode 重排序精度问题"></a>Decode 重排序精度问题</h3><p>最初版本中出现过一个精度问题：前半段数据正确，后半段数据错乱。根因是重排序和结束信号的时序不清晰，部分数据还没有完成拉取或重排，就进入了后续流程。</p>
+<p>修复方式是把流程边界收紧：所有 KV Cache 拉取完成后才开始重排序，重排序完成后再通知 Prefill 侧释放显存。</p>
+<h3 id="Mooncake-对非对等层数传输的支持问题"><a href="#Mooncake-对非对等层数传输的支持问题" class="headerlink" title="Mooncake 对非对等层数传输的支持问题"></a>Mooncake 对非对等层数传输的支持问题</h3><p>PP KV Cache 传输初版遇到过访存越界。原因是当时 Mooncake 版本会根据首地址和本端注册的层数进行拉取，而 PP 场景下两端持有的 layer 数并不总是对等，报错信息里可以看到循环首地址。</p>
+<p>后续 Mooncake 版本更新后解决了这个问题。</p>
+<h2 id="性能收益"><a href="#性能收益" class="headerlink" title="性能收益"></a>性能收益</h2><p>优化后的收益主要体现在两部分：</p>
+<ol>
+<li><code>_reshape</code> 替换 <code>_copy</code> 后，TPOT 从 120ms 降至 94ms。</li>
+<li>在无异步调度时，重排序几乎没有额外 TPOT 损耗。</li>
+</ol>
+<p>PP 适配完成后，DeepSeek PD 分离的性能瓶颈从 Prefill 节点转移到 Decode 节点。调整 PD 分离配比后，归一化 QPS 还能继续提升。</p>
+<h2 id="ACL-Graph-支持-Qwen3-235B-PD-分离"><a href="#ACL-Graph-支持-Qwen3-235B-PD-分离" class="headerlink" title="ACL Graph 支持 Qwen3 235B PD 分离"></a>ACL Graph 支持 Qwen3 235B PD 分离</h2><p>在 Mooncake Connector 与 vLLM 结合的场景下，forward 流程和 Mooncake cat 方法中都使用了 <code>torch_npu._npu_reshape_and_cache</code> 算子。问题表现为：ACL Graph 场景下，调用 vLLM 的 connect 时偶发 cancel 异常。</p>
+<p>这两个算子在功能上等价，但一个在图内调用，另一个在图外调用：</p>
+<ul>
+<li>forward 内部入图的 <code>_npu_reshape_and_cache</code> 与 Mooncake cat 中的 <code>_npu_reshape_and_cache</code> 会互相影响。</li>
+<li>两处算子分别替换成等效实现都能正常跑通，精度也正常。</li>
+<li>注释任意一个算子，也能正常运行。</li>
+<li>同时保留两者时，可能抛出异常或出现不稳定行为。</li>
+</ul>
+<p>异常形式也和调度方式有关：</p>
+<ul>
+<li>ACL Graph + <code>--async-scheduling</code> 时，vLLM connect 抛出 cancel 异常，没有更具体的错误信息。</li>
+<li>关闭 <code>--async-scheduling</code> 后，异常能定位到 forward 内部的 <code>_npu_reshape_and_cache</code>。</li>
+</ul>
+<p>根因在 PageAttention 算子更新过程。算子更新时每次需要额外申请 workspace，这个 workspace 来自单算子流的 pool。算子更新会把 workspace 写入图中，更新结束后 workspace 被释放。但是图重放时，单算子流正在进行 KV Cache 传输；从单算子流视角看，这段 workspace 可以复用，但从图视角看，PageAttention 计算仍然需要这段 workspace，于是发生了内存踩踏。</p>
+<p>规避方案是在 slot mapping 生成后加入同步操作，改变流上的算子排布逻辑，以及图运行和下发的时序。</p>
+<h2 id="融合-transpose-kv-cache-by-block-算子"><a href="#融合-transpose-kv-cache-by-block-算子" class="headerlink" title="融合 transpose_kv_cache_by_block 算子"></a>融合 transpose_kv_cache_by_block 算子</h2><p>当前 GQA 场景下的 layout 转换依赖 <code>_npu_reshape_and_cache</code> 和 <code>_npu_page_load</code>。这个方案能跑通，但仍然存在两个问题：</p>
+<ol>
+<li>算子调用次数过多。目前每层需要 launch 4 个算子，一个请求会调用 376 次算子。</li>
+<li>当前依赖 Decode 间的 bubble 掩盖算子开销。未来异步调度优化 Decode bubble 后，这部分开销可能无法继续被掩盖。</li>
+</ol>
+<p>本质上，这里要做的是一次 transpose，只是现有算子无法一次性完成。因此可以实现一个融合算子，一次完成所有层 KV Cache 的 layout 转换。</p>
+<h3 id="算子接口"><a href="#算子接口" class="headerlink" title="算子接口"></a>算子接口</h3><p>算子的功能是：对传入的 <code>k_cache</code> 和 <code>v_cache</code> TensorList 进行 layout 转换。每隔 <code>block_len</code> 个数据视为一个 block，按照 <code>block_ids</code> 指定的 block 做转换。每个 block 内包含 <code>split_num</code> 份数据，每份表示 <code>num_head / split_num</code> 个 head 的 KV Cache。转换完成后，把这 <code>split_num</code> 份数据在 <code>num_head</code> 维度合并。</p>
+<p>这个算子将结果写回原内存，不额外使用 workspace。</p>
+<p>接口定义如下：</p>
+<figure class="highlight python"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br></pre></td><td class="code"><pre><span class="line">transpose_kv_cache_by_block(</span><br><span class="line">    k_cache,</span><br><span class="line">    v_cache,</span><br><span class="line">    block_ids,</span><br><span class="line">    block_size,</span><br><span class="line">    head_sum,</span><br><span class="line">    head_dim,</span><br><span class="line">    split_num,</span><br><span class="line">    layer_num,</span><br><span class="line">)</span><br></pre></td></tr></table></figure>
+
+<p>算子描述可以抽象成：</p>
+<figure class="highlight json"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br><span class="line">24</span><br><span class="line">25</span><br><span class="line">26</span><br><span class="line">27</span><br><span class="line">28</span><br><span class="line">29</span><br><span class="line">30</span><br><span class="line">31</span><br><span class="line">32</span><br><span class="line">33</span><br></pre></td><td class="code"><pre><span class="line"><span class="punctuation">[</span></span><br><span class="line">  <span class="punctuation">&#123;</span></span><br><span class="line">    <span class="attr">&quot;op&quot;</span><span class="punctuation">:</span> <span class="string">&quot;TransposeKVCacheByBlock&quot;</span><span class="punctuation">,</span></span><br><span class="line">    <span class="attr">&quot;input_desc&quot;</span><span class="punctuation">:</span> <span class="punctuation">[</span></span><br><span class="line">      <span class="punctuation">&#123;</span></span><br><span class="line">        <span class="attr">&quot;name&quot;</span><span class="punctuation">:</span> <span class="string">&quot;KCache&quot;</span><span class="punctuation">,</span></span><br><span class="line">        <span class="attr">&quot;param_type&quot;</span><span class="punctuation">:</span> <span class="string">&quot;required&quot;</span><span class="punctuation">,</span></span><br><span class="line">        <span class="attr">&quot;format&quot;</span><span class="punctuation">:</span> <span class="punctuation">[</span><span class="string">&quot;ND&quot;</span><span class="punctuation">,</span> <span class="string">&quot;ND&quot;</span><span class="punctuation">]</span><span class="punctuation">,</span></span><br><span class="line">        <span class="attr">&quot;type&quot;</span><span class="punctuation">:</span> <span class="punctuation">[</span><span class="string">&quot;fp16&quot;</span><span class="punctuation">,</span> <span class="string">&quot;bf16&quot;</span><span class="punctuation">]</span></span><br><span class="line">      <span class="punctuation">&#125;</span><span class="punctuation">,</span></span><br><span class="line">      <span class="punctuation">&#123;</span></span><br><span class="line">        <span class="attr">&quot;name&quot;</span><span class="punctuation">:</span> <span class="string">&quot;VCache&quot;</span><span class="punctuation">,</span></span><br><span class="line">        <span class="attr">&quot;param_type&quot;</span><span class="punctuation">:</span> <span class="string">&quot;required&quot;</span><span class="punctuation">,</span></span><br><span class="line">        <span class="attr">&quot;format&quot;</span><span class="punctuation">:</span> <span class="punctuation">[</span><span class="string">&quot;ND&quot;</span><span class="punctuation">,</span> <span class="string">&quot;ND&quot;</span><span class="punctuation">]</span><span class="punctuation">,</span></span><br><span class="line">        <span class="attr">&quot;type&quot;</span><span class="punctuation">:</span> <span class="punctuation">[</span><span class="string">&quot;fp16&quot;</span><span class="punctuation">,</span> <span class="string">&quot;bf16&quot;</span><span class="punctuation">]</span></span><br><span class="line">      <span class="punctuation">&#125;</span><span class="punctuation">,</span></span><br><span class="line">      <span class="punctuation">&#123;</span></span><br><span class="line">        <span class="attr">&quot;name&quot;</span><span class="punctuation">:</span> <span class="string">&quot;blockIDs&quot;</span><span class="punctuation">,</span></span><br><span class="line">        <span class="attr">&quot;param_type&quot;</span><span class="punctuation">:</span> <span class="string">&quot;required&quot;</span><span class="punctuation">,</span></span><br><span class="line">        <span class="attr">&quot;format&quot;</span><span class="punctuation">:</span> <span class="punctuation">[</span><span class="string">&quot;ND&quot;</span><span class="punctuation">,</span> <span class="string">&quot;ND&quot;</span><span class="punctuation">]</span><span class="punctuation">,</span></span><br><span class="line">        <span class="attr">&quot;type&quot;</span><span class="punctuation">:</span> <span class="punctuation">[</span><span class="string">&quot;int32&quot;</span><span class="punctuation">,</span> <span class="string">&quot;int32&quot;</span><span class="punctuation">]</span></span><br><span class="line">      <span class="punctuation">&#125;</span></span><br><span class="line">    <span class="punctuation">]</span><span class="punctuation">,</span></span><br><span class="line">    <span class="attr">&quot;output_desc&quot;</span><span class="punctuation">:</span> <span class="punctuation">[</span><span class="punctuation">]</span><span class="punctuation">,</span></span><br><span class="line">    <span class="attr">&quot;attr&quot;</span><span class="punctuation">:</span> <span class="punctuation">[</span></span><br><span class="line">      <span class="punctuation">&#123;</span><span class="attr">&quot;name&quot;</span><span class="punctuation">:</span> <span class="string">&quot;blockSize&quot;</span><span class="punctuation">,</span> <span class="attr">&quot;param_type&quot;</span><span class="punctuation">:</span> <span class="string">&quot;required&quot;</span><span class="punctuation">,</span> <span class="attr">&quot;type&quot;</span><span class="punctuation">:</span> <span class="string">&quot;int&quot;</span><span class="punctuation">&#125;</span><span class="punctuation">,</span></span><br><span class="line">      <span class="punctuation">&#123;</span><span class="attr">&quot;name&quot;</span><span class="punctuation">:</span> <span class="string">&quot;headNum&quot;</span><span class="punctuation">,</span> <span class="attr">&quot;param_type&quot;</span><span class="punctuation">:</span> <span class="string">&quot;required&quot;</span><span class="punctuation">,</span> <span class="attr">&quot;type&quot;</span><span class="punctuation">:</span> <span class="string">&quot;int&quot;</span><span class="punctuation">&#125;</span><span class="punctuation">,</span></span><br><span class="line">      <span class="punctuation">&#123;</span><span class="attr">&quot;name&quot;</span><span class="punctuation">:</span> <span class="string">&quot;headDim&quot;</span><span class="punctuation">,</span> <span class="attr">&quot;param_type&quot;</span><span class="punctuation">:</span> <span class="string">&quot;required&quot;</span><span class="punctuation">,</span> <span class="attr">&quot;type&quot;</span><span class="punctuation">:</span> <span class="string">&quot;int&quot;</span><span class="punctuation">&#125;</span><span class="punctuation">,</span></span><br><span class="line">      <span class="punctuation">&#123;</span><span class="attr">&quot;name&quot;</span><span class="punctuation">:</span> <span class="string">&quot;splitNum&quot;</span><span class="punctuation">,</span> <span class="attr">&quot;param_type&quot;</span><span class="punctuation">:</span> <span class="string">&quot;required&quot;</span><span class="punctuation">,</span> <span class="attr">&quot;type&quot;</span><span class="punctuation">:</span> <span class="string">&quot;int&quot;</span><span class="punctuation">&#125;</span><span class="punctuation">,</span></span><br><span class="line">      <span class="punctuation">&#123;</span><span class="attr">&quot;name&quot;</span><span class="punctuation">:</span> <span class="string">&quot;layerNum&quot;</span><span class="punctuation">,</span> <span class="attr">&quot;param_type&quot;</span><span class="punctuation">:</span> <span class="string">&quot;required&quot;</span><span class="punctuation">,</span> <span class="attr">&quot;type&quot;</span><span class="punctuation">:</span> <span class="string">&quot;int&quot;</span><span class="punctuation">&#125;</span></span><br><span class="line">    <span class="punctuation">]</span></span><br><span class="line">  <span class="punctuation">&#125;</span></span><br><span class="line"><span class="punctuation">]</span></span><br></pre></td></tr></table></figure>
+
+<p>当 <code>num_head = 4</code>、<code>split_num = 4</code> 时，转换过程如下：</p>
+<p><img src="/images/KVOptimization/transpose-split4.png" alt="split_num 为 4 的 KV Cache transpose"></p>
+<p>当 <code>num_head = 4</code>、<code>split_num = 2</code> 时，转换过程如下：</p>
+<p><img src="/images/KVOptimization/transpose-split2.png" alt="split_num 为 2 的 KV Cache transpose"></p>
+<h3 id="实现设计"><a href="#实现设计" class="headerlink" title="实现设计"></a>实现设计</h3><p>首先根据 <code>blockIDs</code> 计算每个 layer 有多少个 block 需要做 layout 转换：</p>
+<figure class="highlight text"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br></pre></td><td class="code"><pre><span class="line">block_num = blockIDs.shape[0]</span><br><span class="line">total_block_num = layerNum * block_num</span><br><span class="line">data_size_load_once = block_size * head_num * head_dim * sizeof(T)</span><br></pre></td></tr></table></figure>
+
+<p>如果 <code>data_size_load_once</code> 单个 core 就可以完成读取，则使用模板一；否则使用模板二。</p>
+<h4 id="模板一：单-core-处理一个-block"><a href="#模板一：单-core-处理一个-block" class="headerlink" title="模板一：单 core 处理一个 block"></a>模板一：单 core 处理一个 block</h4><p>模板一的特点是单个 core 可以完整读取一个 block 的所有数据。整体流程是把整个 block 读入 UB，在 UB 中完成重排，然后直接写回原内存位置。</p>
+<p>负载均衡时，先计算每个 core 至少需要处理多少个 block：</p>
+<figure class="highlight text"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br></pre></td><td class="code"><pre><span class="line">round = total_block_num / vector_core_num</span><br><span class="line">tailCoreNum = total_block_num % vector_core_num</span><br></pre></td></tr></table></figure>
+
+<p>有 <code>tailCoreNum</code> 个 core 需要多处理一个 block。每个 core 负责的 block 可能分布在不同 layer 中，这样能让负载更均衡。</p>
+<p>重排的关键是 <code>DataCopyParams</code>：</p>
+<figure class="highlight cpp"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br></pre></td><td class="code"><pre><span class="line">DataCopyParams repeatParams;</span><br><span class="line">repeatParams.blockCount = blockSize_;</span><br><span class="line">repeatParams.blockLen =</span><br><span class="line">    headNum_ / splitNum_ * headDim_ * <span class="built_in">sizeof</span>(T) / dataBlockSize_;</span><br><span class="line">repeatParams.srcStride = <span class="number">0</span>;</span><br><span class="line">repeatParams.dstStride =</span><br><span class="line">    (headNum_ * headDim_ - headNum_ / splitNum_ * headDim_) *</span><br><span class="line">    <span class="built_in">sizeof</span>(T) / dataBlockSize_;</span><br></pre></td></tr></table></figure>
+
+<p>一条 <code>DataCopy</code> 指令完成 <code>repeatParams.blockCount * repeatParams.blockLen</code> 的搬运量，也就是总数据量的 <code>1 / splitNum_</code>。因此需要执行 <code>splitNum_</code> 次 <code>DataCopy</code>，每次偏移已经完成搬运的部分：</p>
+<figure class="highlight cpp"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br></pre></td><td class="code"><pre><span class="line">dstFactor_ = headNum_ / splitNum_ * headDim_;</span><br><span class="line">srcFactor_ = blockSize_ * headNum_ / splitNum_ * headDim_;</span><br><span class="line"></span><br><span class="line"><span class="keyword">for</span> (<span class="type">uint32_t</span> i = <span class="number">0</span>; i &lt; splitNum_; ++i) &#123;</span><br><span class="line">    <span class="built_in">DataCopy</span>(cacheLocal[i * dstFactor_],</span><br><span class="line">             cacheGm[i * srcFactor_ + offsetBlock],</span><br><span class="line">             repeatParams);</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<p>在 UB 内完成重排后，再连续搬出即可。</p>
+<h4 id="模板二：多-core-协同处理一个-block"><a href="#模板二：多-core-协同处理一个-block" class="headerlink" title="模板二：多 core 协同处理一个 block"></a>模板二：多 core 协同处理一个 block</h4><p>模板二解决的是单个 core 无法读取完整 block 的场景。多个 core 协同读取一个 block，这里的协同 core 数称为 <code>blockSizeSplitNum</code>。</p>
+<p>为了充分利用算力，<code>blockSizeSplitNum</code> 取 AIV core 数的因子。以 48 个 core 为例，可选值包括 2、3、4、6、8、12、16、24、48。实现上选择能满足读取一个 block 的最小因子；如果最大因子也无法满足，就说明超出了算子能力，需要拦截并报错。</p>
+<p>负载均衡公式变为：</p>
+<figure class="highlight text"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br></pre></td><td class="code"><pre><span class="line">core_num = vector_core_num / blockSizeSplitNum</span><br><span class="line">round = total_block_num / core_num</span><br><span class="line">tailCoreNum = total_block_num % core_num</span><br></pre></td></tr></table></figure>
+
+<p>模板二和模板一的主要差异在于 block_size 维度被切分，<code>DataCopyParams</code> 需要修正：</p>
+<figure class="highlight cpp"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br></pre></td><td class="code"><pre><span class="line">blockSizePerTime_ = blockSize / blockSizeSplitNum;</span><br><span class="line">repeatParams.blockCount = blockSizePerTime_;</span><br></pre></td></tr></table></figure>
+
+<p>多个 core 计算同一个 block 时，搬入和搬出地址都需要加上对应偏移：</p>
+<figure class="highlight cpp"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br></pre></td><td class="code"><pre><span class="line"><span class="type">uint32_t</span> blockSizeIndex = blockIdx_ % blockSizeSplitNum_;</span><br><span class="line">srcOffset = blockSizeIndex * blockSizePerTime_ * headNumSplited_ * headDim_;</span><br><span class="line">dstOffset = blockSizeIndex * blockSizePerTime_ * headNum_ * headDim_;</span><br><span class="line"></span><br><span class="line"><span class="built_in">CopyIn</span>(kCacheGm_, offsetBlock + srcOffset, repeatParams);</span><br><span class="line"><span class="built_in">CopyOut</span>(kCacheGm_, offsetBlock + dstOffset);</span><br></pre></td></tr></table></figure>
+
+<p>搬出前需要做一次核间同步，保证所有 core 都已经完成读入，避免覆盖仍在读取的数据。</p>
+<h3 id="性能实测"><a href="#性能实测" class="headerlink" title="性能实测"></a>性能实测</h3><p>使用融合算子后，reshape KV Cache 的时间开销从 UT 中的 7ms 降低到 0.24ms。在 PD 分离场景下，Qwen3 235B 的 TTFT 可降低约 90ms 到 110ms。</p>
+<p><img src="/images/KVOptimization/transpose-benchmark.jpeg" alt="transpose_kv_cache_by_block 性能实测"></p>
+<h2 id="小结"><a href="#小结" class="headerlink" title="小结"></a>小结</h2><p>这次 KV Cache 传输优化的核心不是单纯把数据从 Prefill 搬到 Decode，而是把 TP、PP、模型 attention 结构和执行流同步问题都纳入 Connector 的控制面。</p>
+<p>几个关键经验：</p>
+<ol>
+<li><strong>TransferEngine 不应该感知模型并行细节</strong>。TP&#x2F;PP layout 逻辑放在 Connector 层，底层通信库只负责可靠搬运。</li>
+<li><strong>GQA TP 异构必须显式处理 layout</strong>。MLA 场景中随机选 rank 的假设，不能直接复用到 GQA&#x2F;MHA&#x2F;MQA。</li>
+<li><strong>PP stage 是 KV Cache 路由的一部分</strong>。只看 TP rank 不够，必须同时知道 layer 属于哪个 PP stage。</li>
+<li><strong>性能瓶颈常常来自 kernel launch 次数，而不只是搬运带宽</strong>。从逐 block 重排序到 <code>_npu_page_load</code> + <code>_npu_reshape_and_cache</code>，再到融合算子，本质都是在减少不必要的 launch 和中间搬运。</li>
+<li><strong>ACL Graph 与异步流的内存生命周期需要特别谨慎</strong>。图内 workspace、图外单算子流和 KV 传输并行时，必须保证同步边界清晰。</li>
+</ol>
+<p>最终结果是，PD 分离可以覆盖 Qwen3 235B 这类 GQA 模型和 PP&#x2F;MTP 场景，同时通过融合算子把 layout 转换开销压到更可控的范围内。</p>
+</article><div class="post-copyright"><div class="post-copyright__author"><span class="post-copyright-meta"><i class="fas fa-circle-user fa-fw"></i>文章作者: </span><span class="post-copyright-info"><a href="https://kurumi5210.github.io">chenxiao</a></span></div><div class="post-copyright__type"><span class="post-copyright-meta"><i class="fas fa-square-arrow-up-right fa-fw"></i>文章链接: </span><span class="post-copyright-info"><a href="https://kurumi5210.github.io/2026/07/10/kv-transfer-optimization/">https://kurumi5210.github.io/2026/07/10/kv-transfer-optimization/</a></span></div><div class="post-copyright__notice"><span class="post-copyright-meta"><i class="fas fa-circle-exclamation fa-fw"></i>版权声明: </span><span class="post-copyright-info">本博客所有文章除特别声明外，均采用 <a href="https://creativecommons.org/licenses/by-nc-sa/4.0/" target="_blank">CC BY-NC-SA 4.0</a> 许可协议。转载请注明来源 <a href="https://kurumi5210.github.io" target="_blank">chenxiao's blog</a>！</span></div></div><div class="tag_share"><div class="post-meta__tag-list"><a class="post-meta__tags" href="/tags/vLLM/">vLLM</a><a class="post-meta__tags" href="/tags/Ascend/">Ascend</a><a class="post-meta__tags" href="/tags/KV-Cache/">KV Cache</a><a class="post-meta__tags" href="/tags/%E6%8E%A8%E7%90%86%E4%BC%98%E5%8C%96/">推理优化</a><a class="post-meta__tags" href="/tags/Mooncake/">Mooncake</a><a class="post-meta__tags" href="/tags/PD-%E5%88%86%E7%A6%BB/">PD 分离</a><a class="post-meta__tags" href="/tags/GQA/">GQA</a><a class="post-meta__tags" href="/tags/Pipeline-Parallel/">Pipeline Parallel</a></div><div class="post-share"><div class="social-share" data-image="/img/avatar.png" data-sites="facebook,x,wechat,weibo,qq"></div><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/butterfly-extsrc@1.1.6/sharejs/dist/css/share.min.css" media="print" onload="this.media='all'"><script src="https://cdn.jsdelivr.net/npm/butterfly-extsrc@1.1.6/sharejs/dist/js/social-share.min.js" defer></script></div></div><nav class="pagination-post" id="pagination"><a class="pagination-related full-width" href="/2026/06/04/vllm-ascend-cpu-offloading/" title="为 vLLM-Ascend 实现节点级 CPU Prefix Cache——设计、实现与踩坑记录"><div class="cover" style="background: var(--default-bg-color)"></div><div class="info text-right"><div class="info-1"><div class="info-item-1">下一篇</div><div class="info-item-2">为 vLLM-Ascend 实现节点级 CPU Prefix Cache——设计、实现与踩坑记录</div></div><div class="info-2"><div class="info-item-1"> 项目 PR：vllm-project&#x2F;vllm-ascend#1659  为什么需要 CPU Prefix Cache大模型推理服务有几个关键指标：首 token 延迟（TTFT）、系统吞吐（QPS）、单位请求成本。在真实业务中，用户请求之间存在大量可复用的公共前缀——系统提示词、工具调用模板、多轮对话历史、RAG 检索结果、批量任务中的相同输入片段。如果能把这些前缀的 KV Cache 缓存起来复用，就可以跳过重复的 prefill 计算，直接降低 TTFT、提升吞吐。 vLLM V1 已经支持同节点内 HBM Prefix Cache 的复用，但问题在于：昇腾 NPU 的 HBM 是极其紧缺的资源。模型权重加载完后，留给 KV Cache 的空间很有限；在长上下文、高并发、大 batch 场景下，HBM KV Cache 很快会被活跃请求占满，能长期保留的 Prefix Cache 空间严重不足。所以 HBM Prefix Cache 虽然快，但在生产场景中容量受限，很难形成稳定有效的缓存命中。 那么很自然的想法就是——把 CPU DRAM 用起来。CPU 内存容...</div></div></div></a></nav><div class="relatedPosts"><div class="headline"><i class="fas fa-thumbs-up fa-fw"></i><span>相关推荐</span></div><div class="relatedPosts-list"><a class="pagination-related" href="/2026/06/04/vllm-ascend-cpu-offloading/" title="为 vLLM-Ascend 实现节点级 CPU Prefix Cache——设计、实现与踩坑记录"><div class="cover" style="background: var(--default-bg-color)"></div><div class="info text-center"><div class="info-1"><div class="info-item-1"><i class="far fa-calendar-alt fa-fw"></i> 2026-06-04</div><div class="info-item-2">为 vLLM-Ascend 实现节点级 CPU Prefix Cache——设计、实现与踩坑记录</div></div><div class="info-2"><div class="info-item-1"> 项目 PR：vllm-project&#x2F;vllm-ascend#1659  为什么需要 CPU Prefix Cache大模型推理服务有几个关键指标：首 token 延迟（TTFT）、系统吞吐（QPS）、单位请求成本。在真实业务中，用户请求之间存在大量可复用的公共前缀——系统提示词、工具调用模板、多轮对话历史、RAG 检索结果、批量任务中的相同输入片段。如果能把这些前缀的 KV Cache 缓存起来复用，就可以跳过重复的 prefill 计算，直接降低 TTFT、提升吞吐。 vLLM V1 已经支持同节点内 HBM Prefix Cache 的复用，但问题在于：昇腾 NPU 的 HBM 是极其紧缺的资源。模型权重加载完后，留给 KV Cache 的空间很有限；在长上下文、高并发、大 batch 场景下，HBM KV Cache 很快会被活跃请求占满，能长期保留的 Prefix Cache 空间严重不足。所以 HBM Prefix Cache 虽然快，但在生产场景中容量受限，很难形成稳定有效的缓存命中。 那么很自然的想法就是——把 CPU DRAM 用起来。CPU 内存容...</div></div></div></a></div></div></div><div class="aside-content" id="aside-content"><div class="card-widget card-info text-center"><div class="avatar-img"><img src="/img/avatar.png" onerror="this.onerror=null;this.src='/img/friend_404.gif'" alt="avatar"/></div><div class="author-info-name">chenxiao</div><div class="author-info-description">chenxiao | 技术探索者</div><div class="site-data"><a href="/archives/"><div class="headline">文章</div><div class="length-num">3</div></a><a href="/tags/"><div class="headline">标签</div><div class="length-num">11</div></a><a href="/categories/"><div class="headline">分类</div><div class="length-num">2</div></a></div><a id="card-info-btn" target="_blank" rel="noopener" href="https://github.com/Kurumi5210"><i class="fab fa-github"></i><span>Follow Me</span></a><div class="card-info-social-icons"><a class="social-icon" href="https://github.com/Kurumi5210" target="_blank" title="Github"><i class="fab fa-github" style="color: #24292e;"></i></a><a class="social-icon" href="mailto:jaychou1620@gmail.com" target="_blank" title="Email"><i class="fas fa-envelope" style="color: #4a7dbe;"></i></a></div></div><div class="card-widget card-announcement"><div class="item-headline"><i class="fas fa-bullhorn fa-shake"></i><span>公告</span></div><div class="announcement_content">欢迎来到 chenxiao 的博客，记录学习与成长</div></div><div class="sticky_layout"><div class="card-widget" id="card-toc"><div class="item-headline"><i class="fas fa-stream"></i><span>目录</span><span class="toc-percentage"></span></div><div class="toc-content"><ol class="toc"><li class="toc-item toc-level-2"><a class="toc-link" href="#%E8%83%8C%E6%99%AF%EF%BC%9A%E4%BB%8E-MLA-%E5%88%B0-GQA"><span class="toc-number">1.</span> <span class="toc-text">背景：从 MLA 到 GQA</span></a></li><li class="toc-item toc-level-2"><a class="toc-link" href="#Decode-%E4%BE%A7-KV-Cache-%E9%87%8D%E6%8E%92%E5%BA%8F"><span class="toc-number">2.</span> <span class="toc-text">Decode 侧 KV Cache 重排序</span></a></li><li class="toc-item toc-level-2"><a class="toc-link" href="#%E9%80%89%E6%8B%A9-Prefill-Rank"><span class="toc-number">3.</span> <span class="toc-text">选择 Prefill Rank</span></a></li><li class="toc-item toc-level-2"><a class="toc-link" href="#KV-Cache-%E4%BC%A0%E8%BE%93%E8%B7%AF%E5%BE%84"><span class="toc-number">4.</span> <span class="toc-text">KV Cache 传输路径</span></a></li><li class="toc-item toc-level-2"><a class="toc-link" href="#%E6%89%8B%E5%8A%A8%E5%88%92%E5%88%86-PP-Layer"><span class="toc-number">5.</span> <span class="toc-text">手动划分 PP Layer</span></a></li><li class="toc-item toc-level-2"><a class="toc-link" href="#%E5%BC%80%E5%8F%91%E4%B8%AD%E9%81%87%E5%88%B0%E7%9A%84%E5%87%A0%E4%B8%AA%E9%97%AE%E9%A2%98"><span class="toc-number">6.</span> <span class="toc-text">开发中遇到的几个问题</span></a><ol class="toc-child"><li class="toc-item toc-level-3"><a class="toc-link" href="#Decode-%E9%87%8D%E6%8E%92%E5%BA%8F%E7%B2%BE%E5%BA%A6%E9%97%AE%E9%A2%98"><span class="toc-number">6.1.</span> <span class="toc-text">Decode 重排序精度问题</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#Mooncake-%E5%AF%B9%E9%9D%9E%E5%AF%B9%E7%AD%89%E5%B1%82%E6%95%B0%E4%BC%A0%E8%BE%93%E7%9A%84%E6%94%AF%E6%8C%81%E9%97%AE%E9%A2%98"><span class="toc-number">6.2.</span> <span class="toc-text">Mooncake 对非对等层数传输的支持问题</span></a></li></ol></li><li class="toc-item toc-level-2"><a class="toc-link" href="#%E6%80%A7%E8%83%BD%E6%94%B6%E7%9B%8A"><span class="toc-number">7.</span> <span class="toc-text">性能收益</span></a></li><li class="toc-item toc-level-2"><a class="toc-link" href="#ACL-Graph-%E6%94%AF%E6%8C%81-Qwen3-235B-PD-%E5%88%86%E7%A6%BB"><span class="toc-number">8.</span> <span class="toc-text">ACL Graph 支持 Qwen3 235B PD 分离</span></a></li><li class="toc-item toc-level-2"><a class="toc-link" href="#%E8%9E%8D%E5%90%88-transpose-kv-cache-by-block-%E7%AE%97%E5%AD%90"><span class="toc-number">9.</span> <span class="toc-text">融合 transpose_kv_cache_by_block 算子</span></a><ol class="toc-child"><li class="toc-item toc-level-3"><a class="toc-link" href="#%E7%AE%97%E5%AD%90%E6%8E%A5%E5%8F%A3"><span class="toc-number">9.1.</span> <span class="toc-text">算子接口</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#%E5%AE%9E%E7%8E%B0%E8%AE%BE%E8%AE%A1"><span class="toc-number">9.2.</span> <span class="toc-text">实现设计</span></a><ol class="toc-child"><li class="toc-item toc-level-4"><a class="toc-link" href="#%E6%A8%A1%E6%9D%BF%E4%B8%80%EF%BC%9A%E5%8D%95-core-%E5%A4%84%E7%90%86%E4%B8%80%E4%B8%AA-block"><span class="toc-number">9.2.1.</span> <span class="toc-text">模板一：单 core 处理一个 block</span></a></li><li class="toc-item toc-level-4"><a class="toc-link" href="#%E6%A8%A1%E6%9D%BF%E4%BA%8C%EF%BC%9A%E5%A4%9A-core-%E5%8D%8F%E5%90%8C%E5%A4%84%E7%90%86%E4%B8%80%E4%B8%AA-block"><span class="toc-number">9.2.2.</span> <span class="toc-text">模板二：多 core 协同处理一个 block</span></a></li></ol></li><li class="toc-item toc-level-3"><a class="toc-link" href="#%E6%80%A7%E8%83%BD%E5%AE%9E%E6%B5%8B"><span class="toc-number">9.3.</span> <span class="toc-text">性能实测</span></a></li></ol></li><li class="toc-item toc-level-2"><a class="toc-link" href="#%E5%B0%8F%E7%BB%93"><span class="toc-number">10.</span> <span class="toc-text">小结</span></a></li></ol></div></div><div class="card-widget card-recent-post"><div class="item-headline"><i class="fas fa-history"></i><span>最新文章</span></div><div class="aside-list"><div class="aside-list-item no-cover"><div class="content"><a class="title" href="/2026/07/10/kv-transfer-optimization/" title="PD 分离场景下的 KV Cache 传输优化">PD 分离场景下的 KV Cache 传输优化</a><time datetime="2026-07-10T09:19:56.000Z" title="发表于 2026-07-10 17:19:56">2026-07-10</time></div></div><div class="aside-list-item no-cover"><div class="content"><a class="title" href="/2026/06/04/hello-world/" title="Hello World">Hello World</a><time datetime="2026-06-04T13:40:00.000Z" title="发表于 2026-06-04 21:40:00">2026-06-04</time></div></div><div class="aside-list-item no-cover"><div class="content"><a class="title" href="/2026/06/04/vllm-ascend-cpu-offloading/" title="为 vLLM-Ascend 实现节点级 CPU Prefix Cache——设计、实现与踩坑记录">为 vLLM-Ascend 实现节点级 CPU Prefix Cache——设计、实现与踩坑记录</a><time datetime="2026-06-04T13:40:00.000Z" title="发表于 2026-06-04 21:40:00">2026-06-04</time></div></div></div></div></div></div></main><footer id="footer"><div class="footer-other"><div class="footer-copyright"><span class="copyright">&copy;&nbsp;2025 - 2026 By chenxiao</span><span class="framework-info"><span>框架 </span><a target="_blank" rel="noopener" href="https://hexo.io">Hexo 8.1.2</a><span class="footer-separator">|</span><span>主题 </span><a target="_blank" rel="noopener" href="https://github.com/jerryc127/hexo-theme-butterfly">Butterfly 5.5.4</a></span></div></div></footer></div><div id="rightside"><div id="rightside-config-hide"><button id="readmode" type="button" title="阅读模式"><i class="fas fa-book-open"></i></button><button id="darkmode" type="button" title="日间和夜间模式切换"><i class="fas fa-adjust"></i></button><button id="hide-aside-btn" type="button" title="单栏和双栏切换"><i class="fas fa-arrows-alt-h"></i></button></div><div id="rightside-config-show"><button id="rightside-config" type="button" title="设置"><i class="fas fa-cog fa-spin"></i></button><button class="close" id="mobile-toc-button" type="button" title="目录"><i class="fas fa-list-ul"></i></button><button id="go-up" type="button" title="回到顶部"><span class="scroll-percent"></span><i class="fas fa-arrow-up"></i></button></div></div><div><script src="/js/utils.js?v=5.5.4"></script><script src="/js/main.js?v=5.5.4"></script><div class="js-pjax"></div><script async data-pjax src="//busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js"></script><div id="local-search"><div class="search-dialog"><nav class="search-nav"><span class="search-dialog-title">搜索</span><i class="fas fa-spinner fa-pulse" id="loading-status" hidden="hidden"></i><button class="search-close-button"><i class="fas fa-times"></i></button></nav><div class="text-center" id="loading-database"><i class="fas fa-spinner fa-pulse"></i><span>  数据加载中</span></div><div class="local-search-input"><input placeholder="搜索文章" type="text"/></div><hr/><div id="local-search-results"></div><div class="ais-Pagination" id="local-search-pagination" style="display:none;"><ul class="ais-Pagination-list"></ul></div><div id="local-search-stats"></div></div><div id="search-mask"></div><script src="/js/search/local-search.js?v=5.5.4"></script></div></div></body></html>
